@@ -2,12 +2,14 @@ import os
 import requests
 import time
 import json
+import feedparser
+from datetime import datetime, timedelta
 
 # ==============================================================================
 # KONFIGURASI
 # ==============================================================================
-# Di sini kita akan menyimpan daftar repositori crypto yang ingin kita pantau.
-# Anda bisa menambahkan atau mengubah daftar ini kapan saja.
+
+# Daftar repositori crypto yang ingin kita pantau.
 CRYPTO_REPOS = {
     "SOL": "https://github.com/solana-labs/solana",
     "ETH": "https://github.com/ethereum/go-ethereum",
@@ -15,8 +17,15 @@ CRYPTO_REPOS = {
     "DOT": "https://github.com/paritytech/polkadot-sdk"
 }
 
+# Daftar nama lengkap koin untuk pencarian berita
+COIN_FULL_NAMES = {
+    "SOL": "Solana",
+    "ETH": "Ethereum",
+    "ATOM": "Cosmos",
+    "DOT": "Polkadot"
+}
+
 # Mengambil token dan kunci API dari Replit Secrets
-# BARU: Kita tambahkan GITHUB_PAT
 GITHUB_PAT = os.getenv("GITHUB_PAT")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -28,72 +37,98 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 def get_github_weekly_commits(repo_url):
     """
     Fungsi untuk mengambil jumlah commit dalam seminggu terakhir.
-    VERSI BARU: Menggunakan Personal Access Token (PAT) untuk otentikasi.
+    Menggunakan Personal Access Token (PAT) untuk otentikasi.
     """
     try:
         parts = repo_url.strip('/').split('/')
         owner = parts[-2]
         repo = parts[-1]
-        
         api_url = f"https://api.github.com/repos/{owner}/{repo}/stats/commit_activity"
+        headers = {"Authorization": f"token {GITHUB_PAT}", "Accept": "application/vnd.github.v3+json"}
         
-        # BARU: Menambahkan PAT ke header permintaan kita.
-        # Ini adalah "Kunci VIP" kita untuk GitHub.
-        headers = {
-            "Authorization": f"token {GITHUB_PAT}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        print(f"Menghubungi API GitHub untuk repo {owner}/{repo} (dengan otentikasi)...")
-        
-        # Melakukan permintaan dengan header otentikasi
+        print(f"Mengambil data GitHub untuk [{repo}]...")
         response = requests.get(api_url, headers=headers)
         
-        # Tunggu jika GitHub sedang memproses
         if response.status_code == 202:
-            print("GitHub sedang memproses data, menunggu 3 detik...")
             time.sleep(3)
             response = requests.get(api_url, headers=headers)
 
-        # DEBUG: Cetak status code untuk memastikan semuanya lancar
-        print(f"DEBUG: Status Code dari {repo}: {response.status_code}")
-
-        # Pastikan permintaan berhasil (status code 200)
         if response.status_code == 200:
             data = response.json()
             if data and isinstance(data, list) and len(data) > 0:
-                # Ambil data minggu terakhir
                 last_week_commits = data[-1]['total']
                 return last_week_commits
             else:
-                return 0 # Repo mungkin baru atau tidak ada data aktivitas
+                return 0
         else:
-            # Jika gagal, cetak pesan error dari GitHub
-            print(f"Error: Gagal mengambil data untuk {repo}. Pesan: {response.text}")
+            print(f"  -> Gagal (GitHub Status: {response.status_code})")
             return None
             
     except Exception as e:
-        print(f"Terjadi error yang tidak terduga: {e}")
+        print(f"  -> Terjadi error di fungsi GitHub: {e}")
+        return None
+
+def get_news_mentions(coin_name, days=1):
+    """
+    Fungsi untuk menghitung berapa kali sebuah koin disebut di Google News
+    dalam beberapa hari terakhir.
+    """
+    try:
+        query = f'"{coin_name}"+crypto' # Pakai tanda kutip untuk pencarian lebih akurat
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        
+        print(f"Mengambil berita untuk [{coin_name}]...")
+        feed = feedparser.parse(url)
+        
+        mention_count = 0
+        # Dapatkan waktu saat ini dalam zona waktu UTC untuk perbandingan yang konsisten
+        now_utc = datetime.utcnow().replace(tzinfo=None)
+        time_threshold = now_utc - timedelta(days=days)
+        
+        if not feed.entries:
+             print(f"  -> Tidak ada berita ditemukan untuk [{coin_name}].")
+             return 0
+
+        for entry in feed.entries:
+            # Struct 'published_parsed' dari feedparser sudah dalam format UTC
+            published_time = datetime.fromtimestamp(time.mktime(entry.published_parsed))
+            if published_time > time_threshold:
+                mention_count += 1
+                
+        return mention_count
+        
+    except Exception as e:
+        print(f"  -> Terjadi error di fungsi Berita: {e}")
         return None
 
 
 # ==============================================================================
 # BLOK UNTUK PENGUJIAN
 # ==============================================================================
-# Bagian ini akan menguji semua fungsi kita.
 if __name__ == "__main__":
     
-    print("Memulai Tes Pengambilan Data Narasi...\n")
-    
-    # Menguji fungsi GitHub commit untuk semua repo di daftar kita
-    for ticker, url in CRYPTO_REPOS.items():
-        commits = get_github_weekly_commits(url)
+    print("Memulai Tes Pengambilan Data Narasi v0.2...\n")
+
+    # Menguji kedua fungsi untuk semua repo di daftar kita
+    for ticker, repo_url in CRYPTO_REPOS.items():
+        print(f"===== Analisis untuk Ticker: {ticker} =====")
         
+        # 1. Ambil data commit GitHub
+        commits = get_github_weekly_commits(repo_url)
         if commits is not None:
-            print(f"-> Aktivitas Developer [{ticker}]: {commits} commits/minggu")
+            print(f"  -> Aktivitas Developer: {commits} commits/minggu")
         else:
-            print(f"-> Gagal mengambil data untuk [{ticker}]")
+            print(f"  -> Gagal mengambil data commit.")
         
-        print("-" * 20)
+        # 2. Ambil data berita
+        full_name = COIN_FULL_NAMES[ticker]
+        mentions = get_news_mentions(full_name, days=1) # Mencari berita 1 hari terakhir
+        if mentions is not None:
+            print(f"  -> Hype Media: {mentions} artikel berita (24 jam terakhir)")
+        else:
+            print(f"  -> Gagal mengambil data berita.")
         
-    print("\nTes Selesai.")
+        print("-" * 25 + "\n")
+        
+    print("Tes Selesai.")
+
